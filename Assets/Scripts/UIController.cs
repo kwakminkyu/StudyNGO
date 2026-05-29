@@ -42,14 +42,27 @@ public class UIController : MonoBehaviour
     [SerializeField] private TextMeshProUGUI _player1Name;
     [SerializeField] private Image _player2Avatar;
     [SerializeField] private TextMeshProUGUI _player2Name;
+    [SerializeField] private Image _player3Avatar;
+    [SerializeField] private TextMeshProUGUI _player3Name;
+    [SerializeField] private Image _player4Avatar;
+    [SerializeField] private TextMeshProUGUI _player4Name;
 
-    private LobbyProfileDefault _player1Default;
-    private LobbyProfileDefault _player2Default;
+    private Image[] _lobbyAvatars;
+    private TextMeshProUGUI[] _lobbyNames;
+    private LobbyProfileDefault[] _lobbyProfileDefaults;
+
+    public int LobbyProfileCount => _lobbyAvatars?.Length ?? 0;
 
     private void Awake()
     {
-        _player1Default = new LobbyProfileDefault(_player1Avatar, _player1Name);
-        _player2Default = new LobbyProfileDefault(_player2Avatar, _player2Name);
+        _lobbyAvatars = new[] { _player1Avatar, _player2Avatar, _player3Avatar, _player4Avatar };
+        _lobbyNames = new[] { _player1Name, _player2Name, _player3Name, _player4Name };
+        _lobbyProfileDefaults = new LobbyProfileDefault[_lobbyAvatars.Length];
+
+        for (int i = 0; i < _lobbyAvatars.Length; i++)
+        {
+            _lobbyProfileDefaults[i] = new LobbyProfileDefault(_lobbyAvatars[i], _lobbyNames[i]);
+        }
     }
 
     public void ShowStartScreen()
@@ -72,25 +85,25 @@ public class UIController : MonoBehaviour
 
     public void ClearLobbyProfiles()
     {
-        ClearLobbyProfile(_player1Avatar, _player1Name);
-        ClearLobbyProfile(_player2Avatar, _player2Name);
+        for (int i = 0; i < LobbyProfileCount; i++)
+        {
+            ClearLobbyProfile(_lobbyAvatars[i], _lobbyNames[i]);
+        }
     }
 
     public void ResetLobbyProfile(int playerIndex)
     {
-        LobbyProfileDefault profileDefault = playerIndex == 0 ? _player1Default : _player2Default;
-        Image avatarImage = playerIndex == 0 ? _player1Avatar : _player2Avatar;
-        TextMeshProUGUI nameText = playerIndex == 0 ? _player1Name : _player2Name;
+        if (!TryGetLobbyProfile(playerIndex, out Image avatarImage, out TextMeshProUGUI nameText))
+        {
+            return;
+        }
 
-        profileDefault.ApplyTo(avatarImage, nameText);
+        _lobbyProfileDefaults[playerIndex].ApplyTo(avatarImage, nameText);
     }
 
     public void SetLobbyProfile(int playerIndex, CSteamID steamId)
     {
-        Image avatarImage = playerIndex == 0 ? _player1Avatar : _player2Avatar;
-        TextMeshProUGUI nameText = playerIndex == 0 ? _player1Name : _player2Name;
-
-        if (avatarImage == null || nameText == null)
+        if (!TryGetLobbyProfile(playerIndex, out Image avatarImage, out TextMeshProUGUI nameText))
         {
             return;
         }
@@ -105,6 +118,25 @@ public class UIController : MonoBehaviour
 
         avatarImage.sprite = avatarSprite;
         avatarImage.enabled = true;
+    }
+
+    private bool TryGetLobbyProfile(int playerIndex, out Image avatarImage, out TextMeshProUGUI nameText)
+    {
+        avatarImage = null;
+        nameText = null;
+
+        if (_lobbyAvatars == null
+            || _lobbyNames == null
+            || playerIndex < 0
+            || playerIndex >= _lobbyAvatars.Length
+            || playerIndex >= _lobbyNames.Length)
+        {
+            return false;
+        }
+
+        avatarImage = _lobbyAvatars[playerIndex];
+        nameText = _lobbyNames[playerIndex];
+        return avatarImage != null && nameText != null;
     }
 
     private static void ClearLobbyProfile(Image avatarImage, TextMeshProUGUI nameText)

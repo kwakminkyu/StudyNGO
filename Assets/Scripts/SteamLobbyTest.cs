@@ -3,10 +3,22 @@ using Unity.Netcode;
 //using Netcode.Transports;
 using Steamworks;
 
-public class SteamLobbyTest
+public class SteamLobbyTest : MonoBehaviour
 {
+    private enum LobbyVisibility
+    {
+        Private,
+        FriendsOnly,
+        Public,
+        Invisible
+    }
+
     private const string HostSteamIdKey = "HostSteamId";
     private const string GameStartedKey = "GameStarted";
+
+    [SerializeField] private UIController _uiController;
+    [SerializeField] private LobbyVisibility _lobbyVisibility = LobbyVisibility.FriendsOnly;
+    [SerializeField, Range(1, 4)] private int _maxLobbyMembers = 4;
 
     private Callback<LobbyCreated_t> _lobbyCreated;
     private Callback<GameLobbyJoinRequested_t> _gameLobbyJoinRequested;
@@ -15,47 +27,87 @@ public class SteamLobbyTest
     private Callback<LobbyChatUpdate_t> _lobbyChatUpdate;
     private Callback<AvatarImageLoaded_t> _avatarImageLoaded;
 
-    private readonly UIController _uiController;
     private CSteamID _currentLobbyId;
+    private bool _networkCallbacksRegistered;
+    private bool _isReturningToLobbyAfterOpponentLeft;
+    private bool _steamLobbyInitialized;
 
+    public bool IsInitialized => SteamManager.Initialized;
     public bool IsInLobby => _currentLobbyId.IsValid();
 
-    public SteamLobbyTest(UIController uiController)
+    private void Start()
     {
-        _uiController = uiController;
-
-        _lobbyCreated = Callback<LobbyCreated_t>.Create(OnLobbyCreated);
-        _gameLobbyJoinRequested = Callback<GameLobbyJoinRequested_t>.Create(OnGameLobbyJoinRequested);
-        _lobbyEntered = Callback<LobbyEnter_t>.Create(OnLobbyEntered);
-        _lobbyDataUpdate = Callback<LobbyDataUpdate_t>.Create(OnLobbyDataUpdate);
-        _lobbyChatUpdate = Callback<LobbyChatUpdate_t>.Create(OnLobbyChatUpdate);
-        _avatarImageLoaded = Callback<AvatarImageLoaded_t>.Create(OnAvatarImageLoaded);
+        TryInitializeSteamLobby();
+        RegisterNetworkCallbacks();
     }
 
-    public void Dispose()
+    private void Update()
     {
-        _lobbyCreated?.Dispose();
-        _gameLobbyJoinRequested?.Dispose();
-        _lobbyEntered?.Dispose();
-        _lobbyDataUpdate?.Dispose();
-        _lobbyChatUpdate?.Dispose();
-        _avatarImageLoaded?.Dispose();
+        TryInitializeSteamLobby();
+        RegisterNetworkCallbacks();
+    }
 
-        _lobbyCreated = null;
-        _gameLobbyJoinRequested = null;
-        _lobbyEntered = null;
-        _lobbyDataUpdate = null;
-        _lobbyChatUpdate = null;
-        _avatarImageLoaded = null;
+    private void OnDestroy()
+    {
+        UnregisterNetworkCallbacks();
+        DisposeSteamCallbacks();
     }
 
     public void CreateLobby()
     {
-        SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeFriendsOnly, 4);
+        if (!EnsureSteamLobbyReady())
+        {
+            Debug.LogWarning("Steam is not initialized.");
+            return;
+        }
+
+        SteamMatchmaking.CreateLobby(GetLobbyType(), _maxLobbyMembers);
+    }
+
+    public void SetLobbyVisibility(int visibilityIndex)
+    {
+        if (!System.Enum.IsDefined(typeof(LobbyVisibility), visibilityIndex))
+        {
+            Debug.LogWarning($"Invalid lobby visibility index: {visibilityIndex}");
+            return;
+        }
+
+        _lobbyVisibility = (LobbyVisibility)visibilityIndex;
+    }
+
+    public void SetLobbyPrivate()
+    {
+        _lobbyVisibility = LobbyVisibility.Private;
+    }
+
+    public void SetLobbyFriendsOnly()
+    {
+        _lobbyVisibility = LobbyVisibility.FriendsOnly;
+    }
+
+    public void SetLobbyPublic()
+    {
+        _lobbyVisibility = LobbyVisibility.Public;
+    }
+
+    public void SetLobbyInvisible()
+    {
+        _lobbyVisibility = LobbyVisibility.Invisible;
+    }
+
+    public void StartGame()
+    {
+        StartGameAsHost();
     }
 
     public void StartGameAsHost()
     {
+        if (!EnsureSteamLobbyReady())
+        {
+            Debug.LogWarning("Steam is not initialized.");
+            return;
+        }
+
         if (!_currentLobbyId.IsValid())
         {
             Debug.LogWarning("Lobby is not created yet.");
@@ -85,6 +137,12 @@ public class SteamLobbyTest
 
     public void InviteFriend()
     {
+        if (!EnsureSteamLobbyReady())
+        {
+            Debug.LogWarning("Steam is not initialized.");
+            return;
+        }
+
         if (!_currentLobbyId.IsValid())
         {
             Debug.LogWarning("Lobby is not created yet.");
@@ -96,9 +154,14 @@ public class SteamLobbyTest
             Debug.LogWarning("Steam overlay is not enabled. Invite dialog cannot be opened.");
             return;
         }
+        Debug.Log($"Overlay Enabled: {SteamUtils.IsOverlayEnabled()}");
+        Debug.Log($"Lobby Valid: {_currentLobbyId.IsValid()}");
+        Debug.Log($"Lobby ID: {_currentLobbyId}");
+        Debug.Log($"Lobby Owner: {SteamMatchmaking.GetLobbyOwner(_currentLobbyId)}");
+        Debug.Log($"My Steam ID: {SteamUser.GetSteamID()}");
 
         SteamFriends.ActivateGameOverlayInviteDialog(_currentLobbyId);
-        Debug.Log("Opened Steam friends overlay.");
+        Debug.Log($"Opened Steam invite dialog. LobbyId: {_currentLobbyId}");
     }
 
     public void LeaveLobby()
@@ -121,6 +184,148 @@ public class SteamLobbyTest
 
         SteamMatchmaking.SetLobbyData(_currentLobbyId, GameStartedKey, "0");
         RefreshLobbyProfiles();
+    }
+
+    public void PrintSteamStatus()
+    {
+        Debug.Log($"Steam Initialized: {IsInitialized}");
+
+        if (IsInitialized)
+        {
+            Debug.Log($"Steam Name: {SteamFriends.GetPersonaName()}");
+            Debug.Log($"Steam ID: {SteamUser.GetSteamID()}");
+            Debug.Log($"Steam Overlay Enabled: {SteamUtils.IsOverlayEnabled()}");
+        }
+    }
+
+    public bool IsLocalLobbyOwner()
+    {
+        return _currentLobbyId.IsValid()
+            && SteamMatchmaking.GetLobbyOwner(_currentLobbyId) == SteamUser.GetSteamID();
+    }
+
+    private void TryInitializeSteamLobby()
+    {
+        if (_steamLobbyInitialized)
+        {
+            return;
+        }
+
+        if (!IsInitialized)
+        {
+            return;
+        }
+
+        Debug.Log("Steam Initialized");
+        Debug.Log($"Steam Name: {SteamFriends.GetPersonaName()}");
+        Debug.Log($"Steam ID: {SteamUser.GetSteamID()}");
+
+        RegisterSteamCallbacks();
+        _uiController?.ShowStartScreen();
+        _steamLobbyInitialized = true;
+    }
+
+    private bool EnsureSteamLobbyReady()
+    {
+        TryInitializeSteamLobby();
+        return _steamLobbyInitialized;
+    }
+
+    private ELobbyType GetLobbyType()
+    {
+        return _lobbyVisibility switch
+        {
+            LobbyVisibility.Private => ELobbyType.k_ELobbyTypePrivate,
+            LobbyVisibility.Public => ELobbyType.k_ELobbyTypePublic,
+            LobbyVisibility.Invisible => ELobbyType.k_ELobbyTypeInvisible,
+            _ => ELobbyType.k_ELobbyTypeFriendsOnly
+        };
+    }
+
+    private void RegisterSteamCallbacks()
+    {
+        _lobbyCreated = Callback<LobbyCreated_t>.Create(OnLobbyCreated);
+        _gameLobbyJoinRequested = Callback<GameLobbyJoinRequested_t>.Create(OnGameLobbyJoinRequested);
+        _lobbyEntered = Callback<LobbyEnter_t>.Create(OnLobbyEntered);
+        _lobbyDataUpdate = Callback<LobbyDataUpdate_t>.Create(OnLobbyDataUpdate);
+        _lobbyChatUpdate = Callback<LobbyChatUpdate_t>.Create(OnLobbyChatUpdate);
+        _avatarImageLoaded = Callback<AvatarImageLoaded_t>.Create(OnAvatarImageLoaded);
+    }
+
+    private void DisposeSteamCallbacks()
+    {
+        _lobbyCreated?.Dispose();
+        _gameLobbyJoinRequested?.Dispose();
+        _lobbyEntered?.Dispose();
+        _lobbyDataUpdate?.Dispose();
+        _lobbyChatUpdate?.Dispose();
+        _avatarImageLoaded?.Dispose();
+
+        _lobbyCreated = null;
+        _gameLobbyJoinRequested = null;
+        _lobbyEntered = null;
+        _lobbyDataUpdate = null;
+        _lobbyChatUpdate = null;
+        _avatarImageLoaded = null;
+    }
+
+    private void RegisterNetworkCallbacks()
+    {
+        if (_networkCallbacksRegistered || NetworkManager.Singleton == null)
+        {
+            return;
+        }
+
+        NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
+        NetworkManager.Singleton.OnClientDisconnectCallback += OnClientDisconnected;
+        _networkCallbacksRegistered = true;
+    }
+
+    private void UnregisterNetworkCallbacks()
+    {
+        if (!_networkCallbacksRegistered || NetworkManager.Singleton == null)
+        {
+            return;
+        }
+
+        NetworkManager.Singleton.OnClientConnectedCallback -= OnClientConnected;
+        NetworkManager.Singleton.OnClientDisconnectCallback -= OnClientDisconnected;
+        _networkCallbacksRegistered = false;
+    }
+
+    private void OnClientConnected(ulong clientId)
+    {
+        Debug.Log($"Client connected: {clientId}");
+    }
+
+    private void OnClientDisconnected(ulong clientId)
+    {
+        NetworkManager networkManager = NetworkManager.Singleton;
+        if (networkManager == null)
+        {
+            return;
+        }
+
+        if (_isReturningToLobbyAfterOpponentLeft)
+        {
+            return;
+        }
+
+        if (networkManager.IsServer && clientId != NetworkManager.ServerClientId)
+        {
+            _isReturningToLobbyAfterOpponentLeft = true;
+            SetLobbyWaiting();
+            networkManager.Shutdown();
+            _uiController?.ShowLobbyScreen();
+            _isReturningToLobbyAfterOpponentLeft = false;
+            return;
+        }
+
+        if (!networkManager.IsServer)
+        {
+            LeaveLobby();
+            _uiController?.ShowStartScreen();
+        }
     }
 
     private void OnLobbyCreated(LobbyCreated_t callback)
@@ -243,11 +448,6 @@ public class SteamLobbyTest
         _uiController?.ShowGameScreen();
     }
 
-    public bool IsLocalLobbyOwner()
-    {
-        return SteamMatchmaking.GetLobbyOwner(_currentLobbyId) == SteamUser.GetSteamID();
-    }
-
     private void RefreshLobbyProfiles()
     {
         if (_uiController == null || !_currentLobbyId.IsValid())
@@ -255,20 +455,20 @@ public class SteamLobbyTest
             return;
         }
 
-        bool player1Filled = false;
-        bool player2Filled = false;
+        int profileCount = _uiController.LobbyProfileCount;
+        bool[] filledProfiles = new bool[profileCount];
 
         CSteamID lobbyOwner = SteamMatchmaking.GetLobbyOwner(_currentLobbyId);
-        if (lobbyOwner.IsValid())
+        if (lobbyOwner.IsValid() && profileCount > 0)
         {
             _uiController.SetLobbyProfile(0, lobbyOwner);
-            player1Filled = true;
+            filledProfiles[0] = true;
         }
 
         int memberCount = SteamMatchmaking.GetNumLobbyMembers(_currentLobbyId);
         int nextProfileIndex = lobbyOwner.IsValid() ? 1 : 0;
 
-        for (int i = 0; i < memberCount && nextProfileIndex < 2; i++)
+        for (int i = 0; i < memberCount && nextProfileIndex < profileCount; i++)
         {
             CSteamID lobbyMember = SteamMatchmaking.GetLobbyMemberByIndex(_currentLobbyId, i);
             if (!lobbyMember.IsValid() || lobbyMember == lobbyOwner)
@@ -277,26 +477,16 @@ public class SteamLobbyTest
             }
 
             _uiController.SetLobbyProfile(nextProfileIndex, lobbyMember);
-            if (nextProfileIndex == 0)
-            {
-                player1Filled = true;
-            }
-            else
-            {
-                player2Filled = true;
-            }
-
+            filledProfiles[nextProfileIndex] = true;
             nextProfileIndex++;
         }
 
-        if (!player1Filled)
+        for (int i = 0; i < filledProfiles.Length; i++)
         {
-            _uiController.ResetLobbyProfile(0);
-        }
-
-        if (!player2Filled)
-        {
-            _uiController.ResetLobbyProfile(1);
+            if (!filledProfiles[i])
+            {
+                _uiController.ResetLobbyProfile(i);
+            }
         }
     }
 }
